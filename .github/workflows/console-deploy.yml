@@ -1,0 +1,96 @@
+name: deploy-console
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev]                    # ← add 'prod' later when ready
+        required: true
+      ref:
+        description: "Tag or commit SHA (default: main)"
+        required: false
+      plan_only:
+        description: "Plan only (no apply)"
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}      # 🔐 Enforced by GitHub Environments
+    permissions:
+      id-token: write       # OIDC to AWS
+      contents: read
+    concurrency:
+      group: terraform-console-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: apps/console
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref && inputs.ref || 'main' }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}             # Environment(secret): <env>.AWS_ROLE_ARN
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}  # Environment(var) optional
+          role-session-name: gha-terraform-console-deploy
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Init backend
+        env:
+          TF_IN_AUTOMATION: "true"
+        run: terraform init -backend-config=env/${{ inputs.environment }}.backend.hcl
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan (${{ inputs.environment }})
+        id: plan
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
+        run: |
+          terraform plan \
+            -var-file=env/${{ inputs.environment }}.tfvars \
+            -out=apply.tfplan
+          terraform show -no-color apply.tfplan > plan.${{ inputs.environment }}.txt
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-plan-${{ inputs.environment }}
+          path: |
+            apps/console/apply.tfplan
+            apps/console/plan.${{ inputs.environment }}.txt
+
+      - name: Apply (${{ inputs.environment }})
+        if: ${{ !inputs.plan_only }}
+        env:
+          TF_IN_AUTOMATION: "true"
+          TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
+        run: terraform apply -auto-approve apply.tfplan
+
+      - name: Save deploy metadata
+        if: ${{ always() }}
+        run: |
+          printf '{"app":"console","env":"%s","ref":"%s","time":"%s"}\n' \
+            "${{ inputs.environment }}" "${{ inputs.ref || github.sha }}" "$(date -u +%FT%TZ)" > deploy-metadata.json
+
+      - name: Upload deploy metadata
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-deploy-metadata-${{ inputs.environment }}
+          path: apps/console/deploy-metadata.json
