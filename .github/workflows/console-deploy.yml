@@ -80,10 +80,7 @@ jobs:
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
-        run: |
-          terraform apply \
-              -var-file=envs/${{ inputs.environment }}/variables.tfvars \
-              -auto-approve apply.tfplan
+        run: terraform apply -auto-approve apply.tfplan
 
       - name: Save deploy metadata
         if: ${{ always() }}
