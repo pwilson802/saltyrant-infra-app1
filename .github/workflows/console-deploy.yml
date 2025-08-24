@@ -51,7 +51,7 @@ jobs:
       - name: Init backend
         env:
           TF_IN_AUTOMATION: "true"
-        run: terraform init -backend-config=env/${{ inputs.environment }}.backend.hcl
+        run: terraform init -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
       - name: Validate
         run: terraform validate
@@ -63,7 +63,7 @@ jobs:
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
         run: |
           terraform plan \
-            -var-file=env/${{ inputs.environment }}.tfvars \
+            -var-file=envs/${{ inputs.environment }}/variables.tfvars \
             -out=apply.tfplan
           terraform show -no-color apply.tfplan > plan.${{ inputs.environment }}.txt
 
@@ -80,7 +80,10 @@ jobs:
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
-        run: terraform apply -auto-approve apply.tfplan
+        run: |
+          terraform apply \
+              -var-file=envs/${{ inputs.environment }}/variables.tfvars \
+              -auto-approve apply.tfplan
 
       - name: Save deploy metadata
         if: ${{ always() }}
