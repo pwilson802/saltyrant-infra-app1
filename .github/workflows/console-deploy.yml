@@ -1,4 +1,5 @@
 name: deploy-console
+run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }}"
 
 on:
   workflow_dispatch:
