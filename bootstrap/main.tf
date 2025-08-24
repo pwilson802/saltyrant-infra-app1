@@ -72,22 +72,9 @@ data "aws_iam_policy_document" "assume" {
       values   = ["sts.amazonaws.com"]
     }
     condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "repo:${var.repo_owner}/${var.repo_name}:ref:refs/heads/main",
-        "repo:${var.repo_owner}/${var.repo_name}:pull_request"
-      ]
-    }
-    condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:environment"
-      values   = var.allowed_environments
-    }
-    condition {
       test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:repository"
-      values   = [local.repo_full]
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.repo_owner}/${var.repo_name}:ref:refs/heads/main"]
     }
   }
 }
