@@ -74,7 +74,7 @@ data "aws_iam_policy_document" "assume" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.repo_owner}/${var.repo_name}:ref:refs/heads/main"]
+      values   = ["repo:${var.repo_owner}/${var.repo_name}:environment:${var.env}"]
     }
   }
 }
