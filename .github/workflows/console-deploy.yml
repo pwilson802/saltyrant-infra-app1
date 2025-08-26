@@ -7,7 +7,7 @@ on:
       environment:
         description: "Target environment"
         type: choice
-        options: [dev]            # add 'prod' when you're ready
+        options: [dev, prod]            # add 'prod' when you're ready
         required: true
       mode:
         description: "plan, plan+apply, or apply"
@@ -22,6 +22,7 @@ jobs:
   plan:
     name: Plan (${{ inputs.environment }})
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}-plan
     permissions:
       id-token: write
       contents: read
