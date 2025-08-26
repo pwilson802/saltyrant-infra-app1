@@ -1,5 +1,5 @@
 name: deploy-console
-run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }}"
+run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }} (${{ inputs.mode || 'plan+apply' }})"
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
       environment:
         description: "Target environment"
         type: choice
-        options: [dev, prod]                  # ← add 'prod' when ready
+        options: [dev]                 # add 'prod' when ready
         required: true
       mode:
         description: "What to run"
@@ -20,7 +20,6 @@ on:
 
 jobs:
   plan:
-    if: ${{ inputs.mode == 'plan' || inputs.mode == 'plan+apply' }}
     name: Plan (${{ inputs.environment }})
     runs-on: ubuntu-latest
     permissions: { id-token: write, contents: read }
@@ -32,11 +31,10 @@ jobs:
         uses: actions/checkout@v4
         with: { ref: ${{ inputs.ref && inputs.ref || 'main' }} }
 
-      # Use ONE plan role for all envs (repo secret). You can point this to the same ARN as deploy if you want.
       - name: Configure AWS credentials (plan role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}     # can be same ARN as deploy role
           aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
           role-session-name: plan-console-${{ inputs.environment }}
 
@@ -44,13 +42,16 @@ jobs:
         with: { terraform_version: 1.9.5 }
 
       - name: Init backend
+        if: ${{ inputs.mode != 'apply' }}
         env: { TF_IN_AUTOMATION: "true" }
         run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
       - name: Validate
+        if: ${{ inputs.mode != 'apply' }}
         run: terraform validate
 
       - name: Terraform plan
+        if: ${{ inputs.mode != 'apply' }}
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
@@ -65,6 +66,7 @@ jobs:
         run: echo "name=console-${{ inputs.environment }}-plan" >> "$GITHUB_OUTPUT"
 
       - name: Upload plan artifacts
+        if: ${{ inputs.mode == 'plan' || inputs.mode == 'plan+apply' }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.mkname.outputs.name }}
@@ -75,29 +77,33 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### Terraform plan — console / **${{ inputs.environment }}**"
+            echo "### Terraform **${{ inputs.mode }}** — console / \`${{ inputs.environment }}\`"
             echo "- Version: \`${{ inputs.ref || github.sha }}\`"
-            echo ""
-            echo "<details><summary>Show plan (first 400 lines)</summary>"
-            echo
-            echo '```'
-            sed -n '1,400p' plan.${{ inputs.environment }}.txt || true
-            echo '```'
-            echo
-            echo "Full plan attached as artifact."
-            echo "</details>"
+            if [ "${{ inputs.mode }}" != "apply" ]; then
+              echo ""
+              echo "<details><summary>Show plan (first 400 lines)</summary>"
+              echo
+              echo '```'
+              sed -n '1,400p' plan.${{ inputs.environment }}.txt || true
+              echo '```'
+              echo
+              echo "Full plan attached as artifact."
+              echo "</details>"
+            else
+              echo ""
+              echo "_No plan generated (mode=apply)._"
+            fi
           } >> $GITHUB_STEP_SUMMARY
 
   apply:
-    if: ${{ inputs.mode == 'apply' || inputs.mode == 'plan+apply' }}
     name: Apply (${{ inputs.environment }})
-    needs: ${{ inputs.mode == 'plan+apply' && 'plan' || '' }}
+    needs: [plan]
+    if: ${{ inputs.mode != 'plan' }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}   # 🔐 approval gate (prod will wait here)
+    environment: ${{ inputs.environment }}         # 🔐 approval gate (prod will pause here)
     permissions: { id-token: write, contents: read }
     concurrency:
       group: terraform-console-${{ inputs.environment }}
-      cancel-in-progress: false
     defaults: { run: { working-directory: apps/console } }
     steps:
       - name: Checkout
@@ -118,7 +124,7 @@ jobs:
         env: { TF_IN_AUTOMATION: "true" }
         run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
-      # If we did a plan in this run → download and apply the saved plan (immutable)
+      # plan+apply → apply the saved, reviewed plan
       - name: Download plan artifact
         if: ${{ inputs.mode == 'plan+apply' }}
         uses: actions/download-artifact@v4
@@ -131,7 +137,7 @@ jobs:
         env: { TF_IN_AUTOMATION: "true" }
         run: terraform apply -input=false -auto-approve apply.tfplan
 
-      # If we selected "apply" only → apply directly with tfvars (no saved plan)
+      # apply-only → apply directly with tfvars (no saved plan)
       - name: Apply (no saved plan)
         if: ${{ inputs.mode == 'apply' }}
         env:
