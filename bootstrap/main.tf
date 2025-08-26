@@ -6,6 +6,7 @@ data "aws_partition" "part" {}
 locals {
   bucket_name = "${var.env}-salty-tfstate-${data.aws_caller_identity.me.account_id}"
   role_name   = "salty-tf-github-oidc-${var.env}"
+  role_name   = "salty-tf-github-oidc-readonly-${var.env}"
   key_alias   = "alias/${var.env}-tfstate"
   repo_full   = "${var.repo_owner}/${var.repo_name}"
 }
@@ -117,4 +118,21 @@ resource "aws_iam_policy" "tf" {
 resource "aws_iam_role_policy_attachment" "attach" {
   role       = aws_iam_role.tf_gh.name
   policy_arn = aws_iam_policy.tf.arn
+}
+
+resource "aws_iam_role" "tf_gh_readonly" {
+  name                 = local.role_name
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  description          = "GitHub OIDC role for ${var.env}"
+  max_session_duration = 3600
+}
+
+resource "aws_iam_role_policy_attachment" "attach" {
+  role       = aws_iam_role.tf_gh_readonly.name
+  policy_arn = aws_iam_policy.tf.arn
+}
+
+resource "aws_iam_role_policy_attachment" "readonly_managed" {
+  role       = aws_iam_role.tf_gh_readonly.name
+  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
