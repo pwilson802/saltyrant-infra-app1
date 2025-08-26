@@ -1,5 +1,5 @@
 name: deploy-console
-run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }} (${{ inputs.mode || 'plan+apply' }})"
+run-name: "console -> ${{inputs.environment }} @ ${{ inputs.ref || 'main' }} (mode: ${{ inputs.mode || 'plan+apply' }})"
 
 on:
   workflow_dispatch:
@@ -7,10 +7,10 @@ on:
       environment:
         description: "Target environment"
         type: choice
-        options: [dev]                 # add 'prod' when ready
+        options: [dev]            # add 'prod' when you're ready
         required: true
       mode:
-        description: "What to run"
+        description: "plan, plan+apply, or apply"
         type: choice
         options: [plan, plan+apply, apply]
         default: plan+apply
@@ -22,29 +22,39 @@ jobs:
   plan:
     name: Plan (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    permissions: { id-token: write, contents: read }
-    defaults: { run: { working-directory: apps/console } }
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/console
     outputs:
       artifact_name: ${{ steps.mkname.outputs.name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { ref: ${{ inputs.ref && inputs.ref || 'main' }} }
+        with:
+          ref: ${{ inputs.ref && inputs.ref || 'main' }}
 
+      # Use ONE role for planning (repo secret). If you prefer, point this to the same ARN as deploy.
       - name: Configure AWS credentials (plan role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}     # can be same ARN as deploy role
-          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ap-southeast-2
           role-session-name: plan-console-${{ inputs.environment }}
 
-      - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.9.5 }
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
 
+      # Skip real planning when mode=apply (job still succeeds so 'apply' can run)
       - name: Init backend
         if: ${{ inputs.mode != 'apply' }}
-        env: { TF_IN_AUTOMATION: "true" }
-        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
+        env:
+          TF_IN_AUTOMATION: "true"
+        run: terraform init -reconfigure -backend-config=env/${{ inputs.environment }}.backend.hcl
 
       - name: Validate
         if: ${{ inputs.mode != 'apply' }}
@@ -56,9 +66,7 @@ jobs:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
         run: |
-          terraform plan \
-            -var-file=envs/${{ inputs.environment }}/variables.tfvars \
-            -out=apply.tfplan
+          terraform plan -var-file=env/${{ inputs.environment }}.tfvars -out=apply.tfplan
           terraform show -no-color apply.tfplan > plan.${{ inputs.environment }}.txt
 
       - name: Name artifact
@@ -100,29 +108,39 @@ jobs:
     needs: [plan]
     if: ${{ inputs.mode != 'plan' }}
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}         # 🔐 approval gate (prod will pause here)
-    permissions: { id-token: write, contents: read }
+    # 🔐 Approval gate (prod will pause here when you add it)
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
     concurrency:
       group: terraform-console-${{ inputs.environment }}
-    defaults: { run: { working-directory: apps/console } }
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: apps/console
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { ref: ${{ inputs.ref && inputs.ref || 'main' }} }
+        with:
+          ref: ${{ inputs.ref && inputs.ref || 'main' }}
 
       - name: Configure AWS credentials (deploy role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}             # Environment secret (per env)
-          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}     # Environment secret per env
+          aws-region: ap-southeast-2
           role-session-name: apply-console-${{ inputs.environment }}
 
-      - uses: hashicorp/setup-terraform@v3
-        with: { terraform_version: 1.9.5 }
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
 
       - name: Init backend
-        env: { TF_IN_AUTOMATION: "true" }
-        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
+        env:
+          TF_IN_AUTOMATION: "true"
+        run: terraform init -reconfigure -backend-config=env/${{ inputs.environment }}.backend.hcl
 
       # plan+apply → apply the saved, reviewed plan
       - name: Download plan artifact
@@ -134,7 +152,8 @@ jobs:
 
       - name: Apply reviewed plan
         if: ${{ inputs.mode == 'plan+apply' }}
-        env: { TF_IN_AUTOMATION: "true" }
+        env:
+          TF_IN_AUTOMATION: "true"
         run: terraform apply -input=false -auto-approve apply.tfplan
 
       # apply-only → apply directly with tfvars (no saved plan)
@@ -143,7 +162,7 @@ jobs:
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
-        run: terraform apply -auto-approve -var-file=envs/${{ inputs.environment }}/variables.tfvars
+        run: terraform apply -auto-approve -var-file=env/${{ inputs.environment }}.tfvars
 
       - name: Save deploy metadata
         if: always()
@@ -155,5 +174,4 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: console-deploy-metadata-${{ inputs.environment }}
-          path: apps/console/deploy-metadata.json
+          name: console-deploy-met
