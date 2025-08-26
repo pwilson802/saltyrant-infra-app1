@@ -120,9 +120,31 @@ resource "aws_iam_role_policy_attachment" "attach" {
   policy_arn = aws_iam_policy.tf.arn
 }
 
+# ReadOnly Role for GH Actions
+data "aws_iam_policy_document" "assume-readonly" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["repo:${var.repo_owner}/${var.repo_name}:environment:${var.env}-plan"]
+    }
+  }
+}
+
 resource "aws_iam_role" "tf_gh_readonly" {
   name                 = local.readonly_role_name
-  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  assume_role_policy   = data.aws_iam_policy_document.assume-readonly.json
   description          = "GitHub OIDC role for ${var.env}"
   max_session_duration = 3600
 }
