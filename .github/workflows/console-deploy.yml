@@ -175,4 +175,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: console-deploy-met
+          name: console-deploy-metadata-${{ inputs.environment }}
+          path: deploy-metadata.json
+          if-no-files-found: error
+          
+          
