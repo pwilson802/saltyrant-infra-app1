@@ -1,5 +1,5 @@
 name: deploy-console
-run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }}"
+run-name: "console → ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }} (${{inputs.mode || 'plan+apply' }})"
 
 on:
   workflow_dispatch:
@@ -7,58 +7,50 @@ on:
       environment:
         description: "Target environment"
         type: choice
-        options: [dev]                    # ← add 'prod' later when ready
+        options: [dev, prod]                  # ← add 'prod' when ready
         required: true
+      mode:
+        description: "What to run"
+        type: choice
+        options: [plan, plan+apply, apply]
+        default: plan+apply
       ref:
         description: "Tag or commit SHA (default: main)"
         required: false
-      plan_only:
-        description: "Plan only (no apply)"
-        type: boolean
-        default: false
 
 jobs:
-  deploy:
-    name: Deploy ${{ inputs.environment }} @ ${{ inputs.ref || 'main' }}
+  plan:
+    if: ${{ inputs.mode == 'plan' || inputs.mode == 'plan+apply' }}
+    name: Plan (${{ inputs.environment }})
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}      # 🔐 Enforced by GitHub Environments
-    permissions:
-      id-token: write       # OIDC to AWS
-      contents: read
-    concurrency:
-      group: terraform-console-${{ inputs.environment }}
-      cancel-in-progress: false
-    defaults:
-      run:
-        working-directory: apps/console
+    permissions: { id-token: write, contents: read }
+    defaults: { run: { working-directory: apps/console } }
+    outputs:
+      artifact_name: ${{ steps.mkname.outputs.name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref && inputs.ref || 'main' }}
+        with: { ref: ${{ inputs.ref && inputs.ref || 'main' }} }
 
-      - name: Configure AWS credentials
+      # Use ONE plan role for all envs (repo secret). You can point this to the same ARN as deploy if you want.
+      - name: Configure AWS credentials (plan role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}             # Environment(secret): <env>.AWS_ROLE_ARN
-          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}  # Environment(var) optional
-          role-session-name: gha-terraform-console-deploy
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          role-session-name: plan-console-${{ inputs.environment }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.5
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.9.5 }
 
       - name: Init backend
-        env:
-          TF_IN_AUTOMATION: "true"
-        run: terraform init -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
+        env: { TF_IN_AUTOMATION: "true" }
+        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
       - name: Validate
         run: terraform validate
 
-      - name: Plan (${{ inputs.environment }})
-        id: plan
+      - name: Terraform plan
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
@@ -68,29 +60,93 @@ jobs:
             -out=apply.tfplan
           terraform show -no-color apply.tfplan > plan.${{ inputs.environment }}.txt
 
-      - name: Upload plan artifact
+      - name: Name artifact
+        id: mkname
+        run: echo "name=console-${{ inputs.environment }}-plan" >> "$GITHUB_OUTPUT"
+
+      - name: Upload plan artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: console-plan-${{ inputs.environment }}
+          name: ${{ steps.mkname.outputs.name }}
           path: |
             apps/console/apply.tfplan
             apps/console/plan.${{ inputs.environment }}.txt
 
-      - name: Apply (${{ inputs.environment }})
-        if: ${{ !inputs.plan_only }}
+      - name: Summary
+        run: |
+          {
+            echo "### Terraform plan — console / **${{ inputs.environment }}**"
+            echo "- Version: \`${{ inputs.ref || github.sha }}\`"
+            echo ""
+            echo "<details><summary>Show plan (first 400 lines)</summary>"
+            echo
+            echo '```'
+            sed -n '1,400p' plan.${{ inputs.environment }}.txt || true
+            echo '```'
+            echo
+            echo "Full plan attached as artifact."
+            echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+
+  apply:
+    if: ${{ inputs.mode == 'apply' || inputs.mode == 'plan+apply' }}
+    name: Apply (${{ inputs.environment }})
+    needs: ${{ inputs.mode == 'plan+apply' && 'plan' || '' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}   # 🔐 approval gate (prod will wait here)
+    permissions: { id-token: write, contents: read }
+    concurrency:
+      group: terraform-console-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults: { run: { working-directory: apps/console } }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with: { ref: ${{ inputs.ref && inputs.ref || 'main' }} }
+
+      - name: Configure AWS credentials (deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}             # Environment secret (per env)
+          aws-region: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+          role-session-name: apply-console-${{ inputs.environment }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with: { terraform_version: 1.9.5 }
+
+      - name: Init backend
+        env: { TF_IN_AUTOMATION: "true" }
+        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
+
+      # If we did a plan in this run → download and apply the saved plan (immutable)
+      - name: Download plan artifact
+        if: ${{ inputs.mode == 'plan+apply' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: console-${{ inputs.environment }}-plan
+          path: apps/console
+
+      - name: Apply reviewed plan
+        if: ${{ inputs.mode == 'plan+apply' }}
+        env: { TF_IN_AUTOMATION: "true" }
+        run: terraform apply -input=false -auto-approve apply.tfplan
+
+      # If we selected "apply" only → apply directly with tfvars (no saved plan)
+      - name: Apply (no saved plan)
+        if: ${{ inputs.mode == 'apply' }}
         env:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
-        run: terraform apply -auto-approve apply.tfplan
+        run: terraform apply -auto-approve -var-file=envs/${{ inputs.environment }}/variables.tfvars
 
       - name: Save deploy metadata
-        if: ${{ always() }}
+        if: always()
         run: |
           printf '{"app":"console","env":"%s","ref":"%s","time":"%s"}\n' \
             "${{ inputs.environment }}" "${{ inputs.ref || github.sha }}" "$(date -u +%FT%TZ)" > deploy-metadata.json
 
       - name: Upload deploy metadata
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: console-deploy-metadata-${{ inputs.environment }}
