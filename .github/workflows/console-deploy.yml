@@ -55,7 +55,7 @@ jobs:
         if: ${{ inputs.mode != 'apply' }}
         env:
           TF_IN_AUTOMATION: "true"
-        run: terraform init -reconfigure -backend-config=env/${{ inputs.environment }}.backend.hcl
+        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
       - name: Validate
         if: ${{ inputs.mode != 'apply' }}
@@ -67,7 +67,7 @@ jobs:
           TF_IN_AUTOMATION: "true"
           TF_VAR_release_ref: ${{ inputs.ref || github.sha }}
         run: |
-          terraform plan -var-file=env/${{ inputs.environment }}.tfvars -out=apply.tfplan
+          terraform plan -var-file=envs/${{ inputs.environment }}/variables.tfvars -out=apply.tfplan
           terraform show -no-color apply.tfplan > plan.${{ inputs.environment }}.txt
 
       - name: Name artifact
@@ -141,7 +141,7 @@ jobs:
       - name: Init backend
         env:
           TF_IN_AUTOMATION: "true"
-        run: terraform init -reconfigure -backend-config=env/${{ inputs.environment }}.backend.hcl
+        run: terraform init -reconfigure -backend-config=envs/${{ inputs.environment }}/backend-config.hcl
 
       # plan+apply → apply the saved, reviewed plan
       - name: Download plan artifact
