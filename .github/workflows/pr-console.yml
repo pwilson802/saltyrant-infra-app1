@@ -1,0 +1,117 @@
+name: plan-console (PR to main)
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "apps/console/**"
+      - ".github/workflows/**"   # rerun if workflow changes
+
+permissions:
+  contents: read
+  pull-requests: write        # to comment on the PR
+  id-token: write             # for OIDC to assume a read-only/plan role
+
+jobs:
+  tf-plan-dev:
+    name: Terraform plan (dev) — PR
+    runs-on: ubuntu-latest
+    environment: dev-plan
+    if: ${{ github.event.pull_request.head.repo.fork == false }}   # skip AWS on forks
+    defaults:
+      run:
+        working-directory: apps/console
+    env:
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Use the PR HEAD commit
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Configure AWS credentials (plan-only role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}  # use a read-only/plan role
+          aws-region: ap-southeast-2
+          role-session-name: pr-plan-console-dev
+
+      - name: Init backend (dev)
+        run: terraform init -reconfigure -backend-config=envs/dev/backend-config.hcl
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan (dev)
+        env:
+          TF_VAR_release_ref: ${{ github.event.pull_request.head.sha }}
+        run: |
+          terraform plan -var-file=envs/dev/variables.tfvars -out=apply.tfplan
+          terraform show -no-color apply.tfplan > plan.dev.txt
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-dev-plan-${{ github.run_id }}
+          path: |
+            apps/console/apply.tfplan
+            apps/console/plan.dev.txt
+
+      - name: PR summary
+        run: |
+          {
+            echo "### Terraform plan — console / \`dev\`"
+            echo "- Commit: \`${{ github.event.pull_request.head.sha }}\`"
+            echo ""
+            echo "<details><summary>Show plan (first 300 lines)</summary>"
+            echo
+            echo '```'
+            sed -n '1,300p' plan.dev.txt || true
+            echo '```'
+            echo
+            echo "_Full plan attached as an artifact._"
+            echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Sticky PR comment with plan
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: tf-plan-console-dev
+          message: |
+            **Terraform plan — console / `dev`**
+            Commit: `${{ github.event.pull_request.head.sha }}`
+
+            <details><summary>Show plan (first 300 lines)</summary>
+
+            ```
+            ${{ steps.empty.outputs.noop }}
+            ```
+            </details>
+
+            _Full plan is uploaded as an artifact: `console-dev-plan-${{ github.run_id }}`_
+        env:
+          # Inline the first 300 lines of the plan into the comment
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Inject plan snippet into comment body
+        id: empty
+        run: |
+          # write first 300 lines into GITHUB_STEP_SUMMARY so previous step expands it
+          echo "\`\`\`" > snippet.txt
+          sed -n '1,300p' apps/console/plan.dev.txt >> snippet.txt
+          echo "\`\`\`" >> snippet.txt
+          # no-op output to allow interpolation above
+          echo "noop=$(cat snippet.txt)" >> $GITHUB_OUTPUT
+          
+         message: |
+            Skipping AWS-backed `terraform plan` for forked PRs for security.
+            Ran `fmt -check` and `validate` only.
